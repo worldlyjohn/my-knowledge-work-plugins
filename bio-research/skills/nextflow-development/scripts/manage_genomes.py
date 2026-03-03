@@ -17,6 +17,7 @@ import json
 import os
 import subprocess
 import sys
+import shutil
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -287,12 +288,9 @@ def download_genome(
     info = IGENOMES[genome_id]
 
     # Check for AWS CLI
-    aws_available = subprocess.run(
-        ['which', 'aws'],
-        capture_output=True
-    ).returncode == 0
+    aws_path = shutil.which('aws')
 
-    if not aws_available:
+    if not aws_path:
         print("AWS CLI not found. Required for iGenomes download.")
         print("Install with: pip install awscli")
         print("\nAlternative: Use --genome flag with nf-core pipelines")
@@ -336,7 +334,7 @@ def download_genome(
         print(f"  Downloading {component}...")
 
         # Build AWS command
-        cmd = ['aws', 's3', 'cp', '--no-sign-request']
+        cmd = [aws_path, 's3', 'cp', '--no-sign-request']
 
         if remote_path.endswith('/'):
             cmd.extend(['--recursive', s3_path, str(local_path)])

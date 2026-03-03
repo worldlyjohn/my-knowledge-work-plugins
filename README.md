@@ -50,6 +50,15 @@ claude plugin install sales@my-knowledge-work-plugins
 
 Once installed, plugins activate automatically. Skills fire when relevant, and slash commands are available in your session (e.g., `/sales:call-prep`, `/data:write-query`).
 
+### Shared document skills
+
+Document skills are available as a shared install from Anthropic's skills marketplace (not specific to `partner-built/my-personal`). Add the marketplace and install `document-skills`:
+
+```bash
+/plugin marketplace add anthropics/skills
+/plugin install document-skills@anthropic-agent-skills
+```
+
 ## How Plugins Work
 
 Every plugin follows the same structure:

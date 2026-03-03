@@ -344,13 +344,28 @@ def cmd_list(args):
     return 0
 
 
-def download_fastq_file(url: str, output_path: Path, timeout: int = 600) -> Tuple[str, bool]:
+def download_fastq_file(
+    url: str,
+    output_path: Path,
+    timeout: int = 600,
+    max_bytes: Optional[int] = None,
+    expected_md5: Optional[str] = None,
+    allow_insecure_http: bool = False,
+) -> Tuple[str, bool]:
     """Download a single FASTQ file."""
     filename = output_path.name
     if output_path.exists():
         return filename, True  # Already exists
 
-    success = download_file(url, output_path, timeout=timeout, show_progress=False)
+    success = download_file(
+        url,
+        output_path,
+        timeout=timeout,
+        show_progress=False,
+        max_bytes=max_bytes,
+        expected_md5=expected_md5,
+        require_https=not allow_insecure_http,
+    )
     return filename, success
 
 
@@ -399,6 +414,13 @@ def cmd_download(args):
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    if args.parallel < 1:
+        print("❌ --parallel must be >= 1")
+        return 1
+    if args.parallel > 16:
+        print("⚠️  --parallel capped at 16 for stability")
+        args.parallel = 16
+
     print(f"\nPreparing download for {geo_id}...")
 
     # Get detailed run info (includes BioProject fallback for SuperSeries)
@@ -440,7 +462,7 @@ def cmd_download(args):
     print("\nFetching FASTQ URLs from ENA...")
     fastq_urls = {}
     for sra_study in sorted(sra_studies):
-        study_urls = fetch_ena_fastq_urls(sra_study)
+        study_urls = fetch_ena_fastq_urls(sra_study, allow_insecure_http=args.allow_insecure_http)
         if study_urls:
             print(f"  {sra_study}: {len(study_urls)} runs")
             fastq_urls.update(study_urls)
@@ -474,14 +496,16 @@ def cmd_download(args):
     # Check for existing files
     existing = 0
     downloads_needed = []
-    for srr, urls in fastq_urls.items():
-        for url in urls:
+    for srr, entries in fastq_urls.items():
+        for entry in entries:
+            url = entry.get('url', '')
+            expected_md5 = entry.get('md5') or None
             filename = url.split('/')[-1]
             filepath = output_dir / filename
             if filepath.exists():
                 existing += 1
             else:
-                downloads_needed.append((url, filepath))
+                downloads_needed.append((url, filepath, expected_md5))
 
     if existing:
         print(f"  ✓ {existing} files already exist, skipping")
@@ -501,8 +525,16 @@ def cmd_download(args):
         # Parallel download
         with ThreadPoolExecutor(max_workers=args.parallel) as executor:
             futures = {
-                executor.submit(download_fastq_file, url, filepath): filepath
-                for url, filepath in downloads_needed
+                executor.submit(
+                    download_fastq_file,
+                    url,
+                    filepath,
+                    args.timeout,
+                    args.max_file_size_mb * 1024 * 1024 if args.max_file_size_mb else None,
+                    expected_md5,
+                    args.allow_insecure_http,
+                ): filepath
+                for url, filepath, expected_md5 in downloads_needed
             }
 
             for i, future in enumerate(as_completed(futures), 1):
@@ -516,10 +548,17 @@ def cmd_download(args):
                     failed.append(filename)
     else:
         # Sequential download
-        for i, (url, filepath) in enumerate(downloads_needed, 1):
+        for i, (url, filepath, expected_md5) in enumerate(downloads_needed, 1):
             filename = filepath.name
             print(f"  [{i}/{len(downloads_needed)}] Downloading {filename}...")
-            success = download_file(url, filepath, timeout=args.timeout)
+            success = download_file(
+                url,
+                filepath,
+                timeout=args.timeout,
+                max_bytes=args.max_file_size_mb * 1024 * 1024 if args.max_file_size_mb else None,
+                expected_md5=expected_md5,
+                require_https=not args.allow_insecure_http,
+            )
             if success:
                 successful += 1
                 print(f"    ✓ Done")
@@ -701,8 +740,12 @@ Examples:
     dl_parser.add_argument('--subset', '-s', help='Filter subset (e.g., RNA-Seq:PAIRED)')
     dl_parser.add_argument('--interactive', '-i', action='store_true',
                            help='Interactively select sample group to download')
-    dl_parser.add_argument('--parallel', '-p', type=int, default=4, help='Parallel downloads')
+    dl_parser.add_argument('--parallel', '-p', type=int, default=4, help='Parallel downloads (max 16)')
     dl_parser.add_argument('--timeout', '-t', type=int, default=600, help='Download timeout (sec)')
+    dl_parser.add_argument('--max-file-size-mb', type=int, default=0,
+                           help='Maximum allowed file size in MB (0 disables limit)')
+    dl_parser.add_argument('--allow-insecure-http', action='store_true',
+                           help='Allow HTTP download URLs (not recommended)')
 
     # samplesheet command
     ss_parser = subparsers.add_parser('samplesheet', help='Generate samplesheet')

@@ -5,6 +5,7 @@ NCBI Utilities for GEO/SRA Data Access
 Shared utilities for fetching metadata and downloading data from NCBI services.
 """
 
+import hashlib
 import json
 import logging
 import re
@@ -295,7 +296,7 @@ def fetch_sra_run_info(geo_id: str, bioproject: Optional[str] = None) -> List[Di
         return runs
 
 
-def fetch_ena_fastq_urls(study_accession: str) -> Dict[str, List[str]]:
+def fetch_ena_fastq_urls(study_accession: str, allow_insecure_http: bool = False) -> Dict[str, List[Dict[str, str]]]:
     """
     Get FASTQ download URLs from ENA for an SRA study.
 
@@ -303,15 +304,20 @@ def fetch_ena_fastq_urls(study_accession: str) -> Dict[str, List[str]]:
 
     Args:
         study_accession: SRA study accession (e.g., 'SRP126328')
+        allow_insecure_http: Allow http:// links if HTTPS URL construction fails
 
     Returns:
-        Dict mapping SRR accession to list of FASTQ URLs
+        Dict mapping SRR accession to list of entries: {'url': ..., 'md5': ...}
     """
-    fastq_urls = {}
+    fastq_urls: Dict[str, List[Dict[str, str]]] = {}
 
     try:
-        # Query ENA API
-        ena_url = f"https://www.ebi.ac.uk/ena/portal/api/filereport?accession={study_accession}&result=read_run&fields=run_accession,sample_alias,fastq_ftp&format=tsv"
+        # Query ENA API including checksums for integrity verification
+        ena_url = (
+            "https://www.ebi.ac.uk/ena/portal/api/filereport"
+            f"?accession={study_accession}&result=read_run"
+            "&fields=run_accession,sample_alias,fastq_ftp,fastq_md5&format=tsv"
+        )
 
         if HAS_REQUESTS:
             response = requests.get(ena_url, timeout=60)
@@ -326,22 +332,50 @@ def fetch_ena_fastq_urls(study_accession: str) -> Dict[str, List[str]]:
             return fastq_urls
 
         # Parse TSV
-        header = lines[0].split('\t')
+        header = lines[0].split('	')
         run_idx = header.index('run_accession') if 'run_accession' in header else 0
         ftp_idx = header.index('fastq_ftp') if 'fastq_ftp' in header else 2
+        md5_idx = header.index('fastq_md5') if 'fastq_md5' in header else -1
 
         for line in lines[1:]:
             if not line.strip():
                 continue
-            fields = line.split('\t')
-            if len(fields) > max(run_idx, ftp_idx):
-                srr = fields[run_idx]
-                ftp_urls = fields[ftp_idx]
-                if ftp_urls:
-                    # URLs are semicolon-separated, convert to HTTP URLs
-                    # ENA supports both FTP and HTTP, HTTP is easier with requests
-                    urls = [f"http://{url}" for url in ftp_urls.split(';') if url]
-                    fastq_urls[srr] = urls
+            fields = line.split('	')
+            if len(fields) <= max(run_idx, ftp_idx):
+                continue
+
+            srr = fields[run_idx]
+            ftp_urls = fields[ftp_idx]
+            md5s = fields[md5_idx] if md5_idx >= 0 and len(fields) > md5_idx else ''
+
+            if not ftp_urls:
+                continue
+
+            url_parts = [u for u in ftp_urls.split(';') if u]
+            md5_parts = [m for m in md5s.split(';') if m] if md5s else []
+
+            entries: List[Dict[str, str]] = []
+            for idx, url_part in enumerate(url_parts):
+                if url_part.startswith('ftp://'):
+                    secure_url = 'https://' + url_part[len('ftp://'):]
+                    insecure_url = 'http://' + url_part[len('ftp://'):]
+                elif url_part.startswith('http://'):
+                    secure_url = 'https://' + url_part[len('http://'):]
+                    insecure_url = url_part
+                elif url_part.startswith('https://'):
+                    secure_url = url_part
+                    insecure_url = 'http://' + url_part[len('https://'):]
+                else:
+                    secure_url = f'https://{url_part}'
+                    insecure_url = f'http://{url_part}'
+
+                entries.append({
+                    'url': secure_url if not allow_insecure_http else insecure_url,
+                    'md5': md5_parts[idx] if idx < len(md5_parts) else '',
+                })
+
+            if entries:
+                fastq_urls[srr] = entries
 
         return fastq_urls
 
@@ -350,20 +384,44 @@ def fetch_ena_fastq_urls(study_accession: str) -> Dict[str, List[str]]:
         return fastq_urls
 
 
-def download_file(url: str, output_path: Path, timeout: int = 300, show_progress: bool = True) -> bool:
+def _calculate_md5(filepath: Path, chunk_size: int = 1024 * 1024) -> str:
+    """Calculate MD5 for a local file."""
+    digest = hashlib.md5()
+    with open(filepath, 'rb') as handle:
+        for chunk in iter(lambda: handle.read(chunk_size), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def download_file(
+    url: str,
+    output_path: Path,
+    timeout: int = 300,
+    show_progress: bool = True,
+    max_bytes: Optional[int] = None,
+    expected_md5: Optional[str] = None,
+    require_https: bool = True,
+) -> bool:
     """
-    Download a file with progress indication.
+    Download a file with progress indication and optional integrity/safety checks.
 
     Args:
         url: URL to download
         output_path: Path to save file
         timeout: Download timeout in seconds
         show_progress: Show progress bar
+        max_bytes: Optional hard cap on download size in bytes
+        expected_md5: Optional expected MD5 checksum
+        require_https: Reject non-HTTPS URLs when True
 
     Returns:
         True if successful, False otherwise
     """
     try:
+        if require_https and not url.lower().startswith('https://'):
+            logger.error(f"Refusing non-HTTPS URL: {url}")
+            return False
+
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         if HAS_REQUESTS:
@@ -371,25 +429,66 @@ def download_file(url: str, output_path: Path, timeout: int = 300, show_progress
             response.raise_for_status()
 
             total_size = int(response.headers.get('content-length', 0))
+            if max_bytes is not None and total_size and total_size > max_bytes:
+                logger.error(
+                    f"Refusing download larger than max_bytes ({total_size} > {max_bytes}) for {url}"
+                )
+                return False
 
             with open(output_path, 'wb') as f:
                 downloaded = 0
                 for chunk in response.iter_content(chunk_size=8192):
                     f.write(chunk)
                     downloaded += len(chunk)
+                    if max_bytes is not None and downloaded > max_bytes:
+                        logger.error(
+                            f"Download exceeded max_bytes ({downloaded} > {max_bytes}) for {url}"
+                        )
+                        f.close()
+                        output_path.unlink(missing_ok=True)
+                        return False
                     if show_progress and total_size > 0:
                         pct = (downloaded / total_size) * 100
                         print(f"\r  Progress: {pct:.1f}%", end='', flush=True)
                 if show_progress:
                     print()  # New line after progress
-            return True
         else:
             # Fallback to urllib
             req = Request(url, headers={'User-Agent': 'geo-sra-skill/1.0'})
             with urlopen(req, timeout=timeout) as response:
+                total_size = int(response.headers.get('Content-Length', 0) or 0)
+                if max_bytes is not None and total_size and total_size > max_bytes:
+                    logger.error(
+                        f"Refusing download larger than max_bytes ({total_size} > {max_bytes}) for {url}"
+                    )
+                    return False
+
                 with open(output_path, 'wb') as f:
-                    shutil.copyfileobj(response, f)
-            return True
+                    downloaded = 0
+                    while True:
+                        chunk = response.read(8192)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if max_bytes is not None and downloaded > max_bytes:
+                            logger.error(
+                                f"Download exceeded max_bytes ({downloaded} > {max_bytes}) for {url}"
+                            )
+                            f.close()
+                            output_path.unlink(missing_ok=True)
+                            return False
+
+        if expected_md5:
+            observed = _calculate_md5(output_path)
+            if observed.lower() != expected_md5.lower():
+                logger.error(
+                    f"Checksum mismatch for {output_path.name}: expected {expected_md5}, got {observed}"
+                )
+                output_path.unlink(missing_ok=True)
+                return False
+
+        return True
 
     except Exception as e:
         logger.error(f"Download error for {url}: {e}")

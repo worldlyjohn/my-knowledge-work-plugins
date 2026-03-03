@@ -118,3 +118,5 @@ This plugin works best when connected to your data infrastructure. Add MCP serve
 - **Data Ingestion**: Fivetran, Airbyte, Stitch
 
 Configure MCP servers in your `.mcp.json` or Claude Code settings to enable direct data access.
+
+If your team temporarily disabled connectors, use the re-enable guide: [MCP_REENABLE_TEMPLATE.md](MCP_REENABLE_TEMPLATE.md).

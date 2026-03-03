@@ -1,7 +1,15 @@
 # Security Review Notes
 
 Date: 2026-03-03
-Scope: Targeted static review of executable Python scripts in this repository, with focus on data download and command execution paths.
+Scope: Repository-wide static review of executable/script source files (`*.py`, `*.sh`, `*.js`, `*.ts`) in this repository, with focus on data download and command execution paths.
+
+## Coverage notes
+
+- A full file inventory shows this repo is primarily Markdown content and contains 26 Python scripts plus no shell/js/ts execution code in other top-level domains.
+- Script locations identified during scan:
+  - `bio-research/.../scripts/*.py` and `bio-research/.../scripts/utils/*.py`
+  - `data/skills/data-context-extractor/scripts/package_data_skill.py`
+- No additional executable script files were found in other subdirectories at scan time.
 
 ## Findings
 

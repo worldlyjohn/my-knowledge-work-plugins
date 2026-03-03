@@ -38,11 +38,15 @@ Install plugins from [claude.com/plugins](https://claude.com/plugins/).
 
 ```bash
 # Add the marketplace first
-claude plugin marketplace add anthropics/knowledge-work-plugins
+claude plugin marketplace add ~/dev/my-knowledge-work-plugins
 
 # Then install a specific plugin
-claude plugin install sales@knowledge-work-plugins
+claude plugin install sales@my-knowledge-work-plugins
 ```
+
+
+> **Using your own fork/private clone?**
+> If you rename this repository for internal use, also update `.claude-plugin/marketplace.json` with a non-reserved marketplace `name` (for example `my-knowledge-work-plugins`) before running `claude plugin marketplace add`.
 
 Once installed, plugins activate automatically. Skills fire when relevant, and slash commands are available in your session (e.g., `/sales:call-prep`, `/data:write-query`).
 

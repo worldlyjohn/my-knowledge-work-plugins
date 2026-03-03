@@ -1,7 +1,7 @@
 {
-  "name": "knowledge-work-plugins",
+  "name": "my-knowledge-work-plugins",
   "owner": {
-    "name": "Anthropic"
+    "name": "My Personal"
   },
   "plugins": [
     {
